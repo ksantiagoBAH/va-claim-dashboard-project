@@ -443,12 +443,17 @@ function Dashboard({ attr, onBack }) {
             </span>
           </div>
 
-          {/* Contention */}
+          {/* Contentions */}
           {attr.contentions?.length > 0 && (
             <div className="rounded-xl px-5 py-3 mb-4" style={{background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.15)"}}>
-              <p className="text-blue-300 text-xs font-semibold uppercase tracking-wider mb-1">Primary Contention</p>
-              <p className="text-white font-semibold">{attr.contentions[0].name}</p>
-              {attr.contentions.length > 1 && <p className="text-blue-300 text-xs mt-0.5">+{attr.contentions.length-1} more</p>}
+              <p className="text-blue-300 text-xs font-semibold uppercase tracking-wider mb-2">Contentions</p>
+              <div className="space-y-1">
+                {attr.contentions.map((contention, index) => (
+                  <p key={contention.name || index} className="text-white font-semibold">
+                    {contention.name || "Unnamed contention"}
+                  </p>
+                ))}
+              </div>
             </div>
           )}
 
