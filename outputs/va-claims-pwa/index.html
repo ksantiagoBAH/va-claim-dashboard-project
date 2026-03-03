@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="VA Claims"/>
+  <meta name="theme-color" content="#1e3a6e"/>
+  <link rel="manifest" href="./manifest.json"/>
+  <title>VA Claim Tracker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f1f5f9; }
+    .safe-top    { padding-top: env(safe-area-inset-top); }
+    .safe-bottom { padding-bottom: calc(env(safe-area-inset-bottom) + 1rem); }
+    ::-webkit-scrollbar { width:5px; }
+    ::-webkit-scrollbar-track { background:#f1f5f9; border-radius:8px; }
+    ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:8px; }
+    textarea, input { font-family:inherit; }
+    .slide-up { animation: slideUp 0.35s ease; }
+    .fade-in  { animation: fadeIn  0.25s ease; }
+    @keyframes slideUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes fadeIn  { from{opacity:0} to{opacity:1} }
+    .pulse-dot { animation: pulseDot 2s infinite; }
+    @keyframes pulseDot { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .spinner   { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to{transform:rotate(360deg)} }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef } = React;
+
+/* ── HELPERS ── */
+function fmt(d) {
+  if (!d) return "—";
+  const [y,m,day] = d.split("-");
+  return new Date(y,m-1,day).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+}
+function fmtDT(dt) {
+  if (!dt) return "—";
+  return new Date(dt).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});
+}
+
+/* ── PARSER ── */
+function parseClaim(raw) {
+  const attr = raw?.data?.attributes ?? raw?.attributes ?? raw;
+  if (!attr || typeof attr !== "object") throw new Error("Could not find claim attributes.");
+  if (!attr.claimDate && !attr.status)   throw new Error("JSON doesn't look like a VA claim payload.");
+  // carry the top-level id if nested
+  if (raw?.data?.id && !attr.id) attr.id = raw.data.id;
+  return attr;
+}
+
+/* ── 8-PHASE DEFINITIONS ── */
+const PHASE_DEFS = [
+  { id:1, label:"Claim Received",               phaseKey:"phase1CompleteDate" },
+  { id:2, label:"Under Review",                 phaseKey:"phase2CompleteDate" },
+  { id:3, label:"Gathering of Evidence",        phaseKey:"phase3CompleteDate" },
+  { id:4, label:"Review of Evidence",           phaseKey:"phase4CompleteDate" },
+  { id:5, label:"Preparation for Decision",     phaseKey:"phase5CompleteDate" },
+  { id:6, label:"Pending Decision Approval",    phaseKey:"phase6CompleteDate" },
+  { id:7, label:"Preparation for Notification", phaseKey:"phase7CompleteDate" },
+  { id:8, label:"Complete",                     phaseKey:"phase8CompleteDate" },
+];
+const PHASE_TYPE_TO_ID = {
+  CLAIM_RECEIVED:                1,
+  UNDER_REVIEW:                  2,
+  GATHERING_OF_EVIDENCE:         3,
+  REVIEW_OF_EVIDENCE:            4,
+  PREPARATION_FOR_DECISION:      5,
+  PENDING_DECISION_APPROVAL:     6,
+  PREPARATION_FOR_NOTIFICATION:  7,
+  COMPLETE:                      8,
+};
+function buildPhases(attr) {
+  const prev    = attr.claimPhaseDates?.previousPhases || {};
+  const latest  = attr.claimPhaseDates?.latestPhaseType || "";
+  const current = PHASE_TYPE_TO_ID[latest] || 1;
+  return PHASE_DEFS.map(p => ({
+    ...p,
+    date:    prev[p.phaseKey] || null,
+    complete: p.id <= current,
+    current:  p.id === current,
+  }));
+}
+
+const STATUS_LABELS = {
+  CLAIM_RECEIVED:                     "Claim Received",
+  UNDER_REVIEW:                       "Under Review",
+  GATHERING_OF_EVIDENCE:              "Gathering of Evidence",
+  REVIEW_OF_EVIDENCE:                 "Review of Evidence",
+  EVIDENCE_GATHERING_REVIEW_DECISION: "Evidence Gathering / Review",
+  PREPARATION_FOR_DECISION:           "Preparation for Decision",
+  PENDING_DECISION_APPROVAL:          "Pending Decision Approval",
+  PREPARATION_FOR_NOTIFICATION:       "Preparation for Notification",
+  COMPLETE:                           "Complete",
+};
+
+/* ── DOC STYLES ── */
+const DOC_STYLES = {
+  "STR - Medical - Photocopy":                          {bg:"bg-purple-50",text:"text-purple-700",border:"border-purple-200",emoji:"🏥",tag:"STR",cat:"STR"},
+  "STR":                                                {bg:"bg-purple-50",text:"text-purple-700",border:"border-purple-200",emoji:"🏥",tag:"STR",cat:"STR"},
+  "C&P Exam":                                           {bg:"bg-blue-50",  text:"text-blue-700",  border:"border-blue-200",  emoji:"🩺",tag:"C&P",cat:"C&P"},
+  "Medical Treatment Record - Government Facility":     {bg:"bg-teal-50",  text:"text-teal-700",  border:"border-teal-200",  emoji:"🏛️",tag:"Gov Med",cat:"Medical"},
+  "Medical Treatment Record - Non-Government Facility": {bg:"bg-cyan-50",  text:"text-cyan-700",  border:"border-cyan-200",  emoji:"💊",tag:"Pvt Med",cat:"Medical"},
+  "Disability Benefits Questionnaire (DBQ) - Veteran Provided":{bg:"bg-indigo-50",text:"text-indigo-700",border:"border-indigo-200",emoji:"📋",tag:"DBQ",cat:"C&P"},
+  "VA Form 21-0781, Statement in Support of Claimed Mental Health Disorder(s) Due to an In-Service Traumatic Event(s)":{bg:"bg-orange-50",text:"text-orange-700",border:"border-orange-200",emoji:"📝",tag:"21-0781",cat:"Forms"},
+  "VA 21-526 Veterans Application for Compensation or Pension":{bg:"bg-orange-50",text:"text-orange-700",border:"border-orange-200",emoji:"📄",tag:"526EZ",cat:"Forms"},
+  "Buddy / Lay Statement":                              {bg:"bg-pink-50",  text:"text-pink-700",  border:"border-pink-200",  emoji:"🗒️",tag:"Buddy",cat:"Personal"},
+  "Correspondence":                                     {bg:"bg-gray-50",  text:"text-gray-600",  border:"border-gray-200",  emoji:"📩",tag:"Corr.",cat:"Personal"},
+  "Military Personnel Record":                          {bg:"bg-red-50",   text:"text-red-700",   border:"border-red-200",   emoji:"🎖️",tag:"Military",cat:"Forms"},
+  "Personal Trauma Incident/Marker Worksheet":          {bg:"bg-rose-50",  text:"text-rose-700",  border:"border-rose-200",  emoji:"📑",tag:"Trauma",cat:"Personal"},
+  "Personal Trauma Development Checklist":              {bg:"bg-rose-50",  text:"text-rose-700",  border:"border-rose-200",  emoji:"✅",tag:"Checklist",cat:"Personal"},
+  "CAPRI":                                              {bg:"bg-violet-50",text:"text-violet-700",border:"border-violet-200",emoji:"🗂️",tag:"CAPRI",cat:"Medical"},
+  "VA Memo":                                            {bg:"bg-yellow-50",text:"text-yellow-700",border:"border-yellow-200",emoji:"📋",tag:"VA Memo",cat:"Medical"},
+  "Exam Request":                                       {bg:"bg-blue-50",  text:"text-blue-700",  border:"border-blue-200",  emoji:"🩺",tag:"Exam Req",cat:"C&P"},
+  "DPRIS Response":                                     {bg:"bg-slate-50", text:"text-slate-700", border:"border-slate-200", emoji:"📡",tag:"DPRIS",cat:"Medical"},
+  "ILER IES Record Unavailable Response":               {bg:"bg-slate-50", text:"text-slate-700", border:"border-slate-200", emoji:"🔍",tag:"ILER",cat:"Medical"},
+  "VA 21-22 Appointment of Veterans Serv. Org. as Claimant Rep":{bg:"bg-orange-50",text:"text-orange-700",border:"border-orange-200",emoji:"🤝",tag:"21-22",cat:"Forms"},
+};
+const DEFAULT_STYLE = {bg:"bg-gray-50",text:"text-gray-600",border:"border-gray-100",emoji:"📄",tag:"Doc",cat:"Personal"};
+function getDocStyle(label) { return DOC_STYLES[label] || DEFAULT_STYLE; }
+
+/* ── SHARED UI ── */
+function Card({ children, className="" }) {
+  return <div className={`bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden ${className}`}>{children}</div>;
+}
+function SectionHeader({ icon, title }) {
+  return (
+    <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+      <span>{icon}</span>
+      <span className="text-xs font-bold text-gray-500 uppercase tracking-widest">{title}</span>
+    </div>
+  );
+}
+function InfoRow({ label, value, mono=false, highlight=false }) {
+  return (
+    <div className="flex justify-between items-center px-5 py-2.5 border-b border-gray-50 last:border-0 gap-3">
+      <span className="text-sm text-gray-400 flex-shrink-0">{label}</span>
+      <span className={`text-sm font-semibold text-right ${mono?"font-mono":""} ${highlight?"text-blue-700":"text-gray-800"}`}>{value}</span>
+    </div>
+  );
+}
+function FlagRow({ label, value }) {
+  return (
+    <div className="flex justify-between items-center px-5 py-2.5 border-b border-gray-50 last:border-0">
+      <span className="text-sm text-gray-400">{label}</span>
+      <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${value?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-400"}`}>
+        {value ? "✓ Yes" : "✗ No"}
+      </span>
+    </div>
+  );
+}
+
+/* ── PHASE TIMELINE ── */
+function PhaseTimeline({ phases }) {
+  return (
+    <div className="px-5 py-3">
+      {phases.map((p,i) => (
+        <div key={p.id} className="flex items-start gap-3">
+          <div className="flex flex-col items-center flex-shrink-0">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold border-2
+              ${p.current              ? "bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-200" : ""}
+              ${p.complete && !p.current ? "bg-emerald-500 border-emerald-500 text-white" : ""}
+              ${!p.complete            ? "bg-white border-gray-200 text-gray-300" : ""}
+            `}>
+              {p.complete && !p.current ? "✓" : p.id}
+            </div>
+            {i < phases.length-1 && (
+              <div className={`w-0.5 h-8 mt-0.5 ${p.complete?"bg-emerald-300":"bg-gray-100"}`}/>
+            )}
+          </div>
+          <div className="pb-0.5 pt-1 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-sm font-semibold ${p.current?"text-blue-700":p.complete?"text-gray-700":"text-gray-300"}`}>
+                {p.label}
+              </span>
+              {p.current && (
+                <span className="text-xs font-bold text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                  Current
+                </span>
+              )}
+            </div>
+            {p.date
+              ? <p className="text-xs text-gray-400 mt-0.5">{fmt(p.date)}</p>
+              : <p className="text-xs text-gray-300 italic mt-0.5">Pending</p>
+            }
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── DOCUMENT LIST ── */
+const DOC_CATS = ["All","STR","C&P","Medical","Forms","Personal"];
+function DocumentList({ docs }) {
+  const [cat, setCat] = useState("All");
+  const [q,   setQ]   = useState("");
+  const filtered = docs.filter(d => {
+    const s  = getDocStyle(d.documentTypeLabel);
+    const mq = !q || d.documentTypeLabel?.toLowerCase().includes(q.toLowerCase()) || d.originalFileName?.toLowerCase().includes(q.toLowerCase());
+    return mq && (cat==="All" || s.cat===cat);
+  });
+  const counts = Object.fromEntries(DOC_CATS.map(c => [
+    c,
+    c==="All" ? docs.length : docs.filter(d=>getDocStyle(d.documentTypeLabel).cat===c).length
+  ]));
+  return (
+    <div>
+      <SectionHeader icon="📁" title={`Supporting Documents (${docs.length})`}/>
+      {/* filter pills */}
+      <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto" style={{scrollbarWidth:"none"}}>
+        {DOC_CATS.map(c=>(
+          <button key={c} onClick={()=>setCat(c)}
+            className={`flex-shrink-0 text-xs px-3 py-1.5 rounded-full font-semibold border transition-all
+              ${cat===c?"bg-blue-600 text-white border-blue-600":"bg-white text-gray-500 border-gray-200 hover:border-blue-300"}`}>
+            {c} <span className={`ml-0.5 text-xs ${cat===c?"text-blue-200":"text-gray-400"}`}>{counts[c]}</span>
+          </button>
+        ))}
+      </div>
+      {/* search */}
+      <div className="px-5 pb-3 relative">
+        <span className="absolute left-8 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">🔍</span>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search documents…"
+          className="w-full text-sm border border-gray-200 rounded-xl pl-9 pr-9 py-2.5 bg-gray-50 outline-none focus:border-blue-400"/>
+        {q && <button onClick={()=>setQ("")} className="absolute right-8 top-1/2 -translate-y-1/2 text-gray-400 text-xs">✕</button>}
+      </div>
+      <p className="px-5 pb-2 text-xs text-gray-400">{filtered.length} of {docs.length} documents</p>
+      {/* list */}
+      <div className="divide-y divide-gray-50 max-h-[520px] overflow-y-auto">
+        {filtered.length===0 && <p className="text-center py-10 text-gray-300 text-sm">No matches</p>}
+        {filtered.map((doc,i)=>{
+          const s = getDocStyle(doc.documentTypeLabel);
+          return (
+            <div key={doc.documentId||i} className="flex items-start gap-3 px-5 py-3 hover:bg-blue-50/40 transition-colors">
+              <span className="text-lg flex-shrink-0 mt-0.5">{s.emoji}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-800 leading-tight">{doc.documentTypeLabel}</p>
+                <p className="text-xs text-gray-400 truncate mt-0.5 font-mono">{doc.originalFileName}</p>
+                <p className="text-xs text-gray-300 mt-0.5">{fmtDT(doc.uploadDateTime)}</p>
+              </div>
+              <span className={`flex-shrink-0 text-xs font-semibold px-2 py-0.5 rounded-full border ${s.bg} ${s.text} ${s.border}`}>
+                {s.tag}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ── TRACKED ITEMS ── */
+function TrackedItems({ items }) {
+  if (!items?.length) return null;
+  return (
+    <div>
+      <SectionHeader icon="📌" title="Tracked Items"/>
+      {items.map(item=>(
+        <div key={item.id} className="px-5 py-3 border-b border-gray-50 last:border-0">
+          <div className="flex justify-between items-start gap-2 mb-2">
+            <p className="text-sm font-semibold text-gray-800">{item.displayName}</p>
+            <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0">
+              {item.status?.replace(/_/g," ").toLowerCase().replace(/\b\w/g,c=>c.toUpperCase())}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            {[["Requested",item.requestedDate],["Suspense",item.suspenseDate],["Closed",item.closedDate]].map(([l,v])=>(
+              <div key={l} className="bg-gray-50 rounded-lg px-2 py-2">
+                <p className="text-xs text-gray-400">{l}</p>
+                <p className="text-xs font-semibold text-gray-700 mt-0.5">{fmt(v)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── VETERAN RESOURCES ── */
+const RESOURCES = [
+  {
+    category: "Regulations & Manuals",
+    color: "blue",
+    icon: "⚖️",
+    items: [
+      { label: "38 CFR — Code of Federal Regulations",       sub: "Title 38 · Veterans Benefits",              url: "https://www.ecfr.gov/current/title-38" },
+      { label: "M21-1 Adjudication Procedures Manual",       sub: "VA's official claims processing guide",     url: "https://www.knowva.ebenefits.va.gov/system/templates/selfservice/va_ssnew/help/customer/locale/en-US/portal/554400000001018/topic/554400000004049/M21-1-Adjudication-Procedures-Manual" },
+      { label: "38 U.S.C. — Veterans Benefits Law",          sub: "United States Code · Title 38",             url: "https://uscode.house.gov/browse/prelim@title38&edition=prelim" },
+      { label: "VA Schedule for Rating Disabilities (VASRD)", sub: "Official disability rating criteria",       url: "https://www.ecfr.gov/current/title-38/chapter-I/part-4" },
+    ],
+  },
+  {
+    category: "VA Official Portals",
+    color: "emerald",
+    icon: "🏛️",
+    items: [
+      { label: "VA.gov — Benefits Overview",                 sub: "File claims, check status, manage benefits", url: "https://www.va.gov/disability/" },
+      { label: "VA Lighthouse API Docs",                     sub: "Claims & benefits developer API reference",   url: "https://developer.va.gov/explore/api/claims" },
+      { label: "Board of Veterans' Appeals",                 sub: "Appeals process & docket information",       url: "https://www.bva.va.gov" },
+      { label: "CAVC — Court of Appeals for Vet. Claims",    sub: "Federal court review of BVA decisions",      url: "https://www.uscourts.cavc.gov" },
+    ],
+  },
+  {
+    category: "Research & Knowledge Bases",
+    color: "violet",
+    icon: "🔬",
+    items: [
+      { label: "VA Knowledgebase (KnowVA)",                  sub: "Searchable VA policy & procedure library",   url: "https://www.knowva.ebenefits.va.gov" },
+      { label: "Veteran Redfit / VBMS Reference",            sub: "Claims processing quick-reference tool",     url: "https://www.benefits.va.gov/BENEFITS/docs/claimexam-factsheet.pdf" },
+      { label: "VetApp — DBQ Library",                       sub: "All Disability Benefits Questionnaires",     url: "https://www.benefits.va.gov/compensation/dbq_disabilityexams.asp" },
+      { label: "GovInfo — Federal Register (VA)",            sub: "VA rulemaking & policy announcements",       url: "https://www.govinfo.gov/app/collection/fr?packageid=FR-" },
+    ],
+  },
+  {
+    category: "Community & Support",
+    color: "rose",
+    icon: "🤝",
+    items: [
+      { label: "r/VeteransBenefits",                         sub: "Reddit · Claims strategy & peer support",    url: "https://www.reddit.com/r/VeteransBenefits/" },
+      { label: "r/Veterans",                                 sub: "Reddit · General veteran community",         url: "https://www.reddit.com/r/veterans/" },
+      { label: "HadIt.com Forums",                           sub: "Long-running vet benefits community",        url: "https://www.hadit.com" },
+      { label: "DAV — Disability Application Help",          sub: "Free VSO claims assistance",                 url: "https://www.dav.org/veterans/compensation-benefits/" },
+    ],
+  },
+  {
+    category: "Legal & Appeals",
+    color: "amber",
+    icon: "⚖️",
+    items: [
+      { label: "NOVA — Veterans Advocates Directory",        sub: "Find an accredited claims agent or attorney", url: "https://www.nova.org/find-attorney" },
+      { label: "Veterans Law Blog",                          sub: "Plain-English VA law & strategy guides",      url: "https://www.veteranslawblog.org" },
+      { label: "OGC Accreditation Search",                   sub: "VA-accredited attorneys, agents & VSOs",     url: "https://www.va.gov/ogc/apps/accreditation/index.asp" },
+      { label: "Caluza Triangle Framework",                  sub: "3-prong service connection standard",        url: "https://www.veteranslawblog.org/caluza-triangle/" },
+    ],
+  },
+];
+
+const PALETTE = {
+  blue:    { bg:"bg-blue-50",   border:"border-blue-200",  text:"text-blue-700",   icon:"bg-blue-100",   dot:"bg-blue-400"   },
+  emerald: { bg:"bg-emerald-50",border:"border-emerald-200",text:"text-emerald-700",icon:"bg-emerald-100",dot:"bg-emerald-400" },
+  violet:  { bg:"bg-violet-50", border:"border-violet-200",text:"text-violet-700",  icon:"bg-violet-100", dot:"bg-violet-400"  },
+  rose:    { bg:"bg-rose-50",   border:"border-rose-200",  text:"text-rose-700",   icon:"bg-rose-100",   dot:"bg-rose-400"   },
+  amber:   { bg:"bg-amber-50",  border:"border-amber-200", text:"text-amber-700",  icon:"bg-amber-100",  dot:"bg-amber-400"  },
+};
+
+function VeteranResources() {
+  const [open, setOpen] = useState(null);
+  return (
+    <Card>
+      <SectionHeader icon="📚" title="Veteran Resources & References"/>
+      <div className="p-5 space-y-3">
+        {RESOURCES.map((group) => {
+          const p   = PALETTE[group.color];
+          const isOpen = open === group.category;
+          return (
+            <div key={group.category} className={`rounded-xl border overflow-hidden ${p.border}`}>
+              {/* Group header — clickable to expand */}
+              <button
+                onClick={() => setOpen(isOpen ? null : group.category)}
+                className={`w-full flex items-center justify-between px-4 py-3 ${p.bg} transition-colors hover:brightness-95`}>
+                <div className="flex items-center gap-3">
+                  <span className={`w-8 h-8 rounded-lg ${p.icon} flex items-center justify-center text-base`}>{group.icon}</span>
+                  <span className={`text-sm font-bold ${p.text}`}>{group.category}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${p.icon} ${p.text}`}>{group.items.length}</span>
+                  <span className={`text-xs ${p.text} transition-transform ${isOpen?"rotate-180":"rotate-0"} inline-block`}>▼</span>
+                </div>
+              </button>
+              {/* Items */}
+              {isOpen && (
+                <div className="divide-y divide-gray-50 bg-white">
+                  {group.items.map((item) => (
+                    <a key={item.url} href={item.url} target="_blank" rel="noopener noreferrer"
+                      className="flex items-start gap-3 px-4 py-3 hover:bg-gray-50 transition-colors group">
+                      <span className={`w-2 h-2 rounded-full ${p.dot} flex-shrink-0 mt-1.5`}/>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-gray-800 group-hover:text-blue-700 transition-colors leading-tight">
+                          {item.label}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-0.5">{item.sub}</p>
+                      </div>
+                      <span className="text-gray-300 group-hover:text-blue-400 text-xs flex-shrink-0 mt-0.5 transition-colors">↗</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+/* ── DASHBOARD (single-page, two-column) ── */
+function Dashboard({ attr, onBack }) {
+  const phases  = buildPhases(attr);
+  const status  = STATUS_LABELS[attr.status] || attr.status || "—";
+  const isOpen  = attr.status !== "COMPLETE";
+  const today   = new Date();
+  const minD    = attr.minEstClaimDate ? new Date(attr.minEstClaimDate) : null;
+  const maxD    = attr.maxEstClaimDate ? new Date(attr.maxEstClaimDate) : null;
+  const pct     = minD && maxD ? Math.min(100, Math.round((Math.max(0,today-minD)/(maxD-minD))*100)) : 0;
+  const daysFiled = attr.claimDate
+    ? Math.round((today - new Date(attr.claimDate)) / 86400000)
+    : null;
+
+  return (
+    <div className="min-h-screen bg-gray-50 fade-in">
+
+      {/* ── HEADER ── */}
+      <div className="safe-top" style={{background:"linear-gradient(135deg,#1e3a6e 0%,#1d4ed8 100%)"}}>
+        <div className="max-w-6xl mx-auto px-5 pt-5 pb-0">
+          <button onClick={onBack}
+            className="flex items-center gap-1 text-blue-200 text-sm mb-4 hover:text-white transition-colors">
+            ← New Lookup
+          </button>
+
+          <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+            <div>
+              <p className="text-blue-300 text-xs font-bold tracking-widest uppercase mb-1">🇺🇸 VA Disability Claim</p>
+              <h1 className="text-2xl font-bold text-white leading-tight">{attr.displayTitle||"Claim for Disability Compensation"}</h1>
+              <p className="text-blue-200 text-sm mt-1">
+                ID: <span className="text-white font-mono font-bold">{attr.id||"—"}</span>
+                <span className="mx-2 text-blue-500">·</span>
+                Filed <span className="text-white font-medium">{fmt(attr.claimDate)}</span>
+              </p>
+            </div>
+            <span className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-amber-400/20 text-amber-200 border border-amber-400/30 mt-1">
+              {isOpen && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 pulse-dot inline-block"/>}
+              {status}
+            </span>
+          </div>
+
+          {/* Contention */}
+          {attr.contentions?.length > 0 && (
+            <div className="rounded-xl px-5 py-3 mb-4" style={{background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.15)"}}>
+              <p className="text-blue-300 text-xs font-semibold uppercase tracking-wider mb-1">Primary Contention</p>
+              <p className="text-white font-semibold">{attr.contentions[0].name}</p>
+              {attr.contentions.length > 1 && <p className="text-blue-300 text-xs mt-0.5">+{attr.contentions.length-1} more</p>}
+            </div>
+          )}
+
+          {/* Quick stats */}
+          <div className="grid grid-cols-3 gap-3 pb-5">
+            {[
+              {label:"Documents Filed", value:attr.supportingDocuments?.length||0, sub:"across all types"},
+              {label:"Days in Process",  value:daysFiled??"—",                      sub:`since ${fmt(attr.claimDate)}`},
+              {label:"Decision Window",  value:minD&&maxD?`${fmt(attr.minEstClaimDate).split(",")[0]}–${fmt(attr.maxEstClaimDate).split(",")[0]}`:"—", sub:"estimated range"},
+            ].map(s=>(
+              <div key={s.label} className="rounded-xl px-3 py-3 text-center" style={{background:"rgba(255,255,255,0.1)"}}>
+                <p className="text-white font-bold text-xl leading-tight">{s.value}</p>
+                <p className="text-blue-200 text-xs font-medium mt-0.5">{s.label}</p>
+                <p className="text-blue-400 text-xs mt-0.5">{s.sub}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── BODY ── */}
+      <div className="max-w-6xl mx-auto px-4 py-6 safe-bottom">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+          {/* ── LEFT COLUMN ── */}
+          <div className="space-y-5">
+
+            {/* Decision window */}
+            {minD && maxD && (
+              <Card>
+                <SectionHeader icon="📅" title="Estimated Decision Window"/>
+                <div className="px-5 py-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-center">
+                      <p className="text-xs text-gray-400">Earliest</p>
+                      <p className="text-sm font-bold text-emerald-600">{fmt(attr.minEstClaimDate)}</p>
+                    </div>
+                    <div className="flex-1 mx-4">
+                      <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="h-full rounded-full" style={{width:`${pct}%`,background:"linear-gradient(90deg,#10b981,#3b82f6)"}}/>
+                      </div>
+                      <p className="text-center text-xs text-gray-400 mt-1">Today: {fmt(today.toISOString().split("T")[0])}</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-xs text-gray-400">Latest</p>
+                      <p className="text-sm font-bold text-blue-600">{fmt(attr.maxEstClaimDate)}</p>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {/* Phase timeline */}
+            <Card>
+              <SectionHeader icon="🗺️" title="Claim Phase Timeline (8 Phases)"/>
+              <PhaseTimeline phases={phases}/>
+            </Card>
+
+            {/* Claim details */}
+            <Card>
+              <SectionHeader icon="📋" title="Claim Details"/>
+              <InfoRow label="Claim Type"          value={attr.claimType||"—"}/>
+              <InfoRow label="Type Code"           value={attr.claimTypeCode||"—"} mono/>
+              <InfoRow label="End Product Code"    value={attr.endProductCode||"—"}/>
+              <InfoRow label="Jurisdiction"        value={attr.jurisdiction||"—"}/>
+              <InfoRow label="Temp Jurisdiction"   value={attr.tempJurisdiction||"—"} highlight/>
+              <InfoRow label="Submitted Via"       value={attr.submitterApplicationCode||"—"}/>
+              <InfoRow label="Submitter Role"      value={attr.submitterRoleCode||"—"}/>
+              <InfoRow label="Lighthouse ID"       value={attr.lighthouseId||"—"}/>
+              <InfoRow label="Phase Changed"       value={fmt(attr.claimPhaseDates?.phaseChangeDate)}/>
+              <InfoRow label="Close Date"          value={attr.closeDate?fmt(attr.closeDate):"Open"}/>
+            </Card>
+
+            {/* Status flags */}
+            <Card>
+              <SectionHeader icon="🚩" title="Status Flags"/>
+              <FlagRow label="Development Letter Sent" value={attr.developmentLetterSent}/>
+              <FlagRow label="Decision Letter Sent"    value={attr.decisionLetterSent}/>
+              <FlagRow label="Documents Needed"        value={attr.documentsNeeded}/>
+              <FlagRow label="Evidence Waiver (5103)"  value={attr.evidenceWaiverSubmitted5103}/>
+              <FlagRow label="Can Upload Docs"         value={attr.canUpload}/>
+            </Card>
+
+            {/* Tracked items */}
+            {attr.trackedItems?.length > 0 && (
+              <Card><TrackedItems items={attr.trackedItems}/></Card>
+            )}
+          </div>
+
+          {/* ── RIGHT COLUMN (2/3) ── */}
+          <div className="lg:col-span-2 space-y-5">
+            <Card>
+              {attr.supportingDocuments?.length > 0
+                ? <DocumentList docs={attr.supportingDocuments}/>
+                : (
+                  <div>
+                    <SectionHeader icon="📁" title="Supporting Documents"/>
+                    <p className="text-center py-16 text-gray-300 text-sm">No documents on file.</p>
+                  </div>
+                )
+              }
+            </Card>
+            <VeteranResources/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── INPUT SCREEN ── */
+function InputScreen({ onLoad }) {
+  const [mode,    setMode]    = useState("json");
+  const [url,     setUrl]     = useState("");
+  const [token,   setToken]   = useState("");
+  const [json,    setJson]    = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [dragging,setDragging]= useState(false);
+  const fileRef = useRef();
+
+  function readFile(file) {
+    if (!file) return;
+    if (!file.name.endsWith(".json") && file.type !== "application/json") {
+      setError("Please select a .json file."); return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+      try   { onLoad(parseClaim(JSON.parse(e.target.result))); }
+      catch (err) { setError("Invalid JSON: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+
+  function onDragOver(e)  { e.preventDefault(); setDragging(true);  }
+  function onDragLeave()  { setDragging(false); }
+  function onDrop(e)      { e.preventDefault(); setDragging(false); readFile(e.dataTransfer.files[0]); }
+
+  function handlePaste() {
+    setError("");
+    try   { onLoad(parseClaim(JSON.parse(json.trim()))); }
+    catch (e) { setError("Invalid JSON: " + e.message); }
+  }
+
+  async function handleApi() {
+    if (!url.trim()) { setError("Please enter an API URL."); return; }
+    setLoading(true); setError("");
+    try {
+      const headers = {"Content-Type":"application/json","Accept":"application/json"};
+      if (token.trim()) headers["Authorization"] = `Bearer ${token.trim()}`;
+      const res = await fetch(url.trim(), { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      onLoad(parseClaim(await res.json()));
+    } catch(e) {
+      setError(
+        e.message.includes("fetch") || e.message.includes("Network")
+          ? "⚠️ CORS blocked — the API server doesn't allow direct browser requests. Use the Paste JSON or Upload File tab instead."
+          : e.message
+      );
+    } finally { setLoading(false); }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-start pt-0">
+      <div className="w-full max-w-lg">
+        {/* Header */}
+        <div className="safe-top" style={{background:"linear-gradient(135deg,#1e3a6e,#1d4ed8)"}}>
+          <div className="px-6 pt-12 pb-8 text-center">
+            <div className="text-5xl mb-3">🇺🇸</div>
+            <h1 className="text-2xl font-bold text-white">VA Claim Tracker</h1>
+            <p className="text-blue-200 text-sm mt-1">Load your claim data to get started</p>
+          </div>
+          {/* Mode tabs */}
+          <div className="flex mx-4 mb-0 bg-blue-900/40 rounded-xl p-1 gap-1">
+            {[["json","📋 Paste JSON"],["file","📂 Upload File"],["api","🔗 API URL"]].map(([k,l])=>(
+              <button key={k} onClick={()=>{setMode(k);setError("");}}
+                className={`flex-1 text-xs font-semibold py-2.5 rounded-lg transition-all
+                  ${mode===k?"bg-white text-blue-800 shadow-sm":"text-blue-200 hover:text-white"}`}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div className="h-5"/>
+        </div>
+
+        {/* Form body */}
+        <div className="p-5 space-y-4">
+
+          {/* PASTE JSON */}
+          {mode==="json" && (
+            <>
+              <label className="text-xs font-bold text-gray-500 uppercase tracking-wide block mb-1">VA Claim JSON Payload</label>
+              <textarea value={json} onChange={e=>setJson(e.target.value)} rows={14}
+                placeholder={'{\n  "data": {\n    "id": "125022379",\n    "type": "claim",\n    "attributes": { ... }\n  }\n}'}
+                className="w-full text-xs font-mono border border-gray-200 rounded-xl px-4 py-3 bg-white outline-none focus:border-blue-400 resize-none leading-relaxed"/>
+              <button onClick={handlePaste}
+                className="w-full py-4 rounded-2xl text-white font-bold text-base active:opacity-80"
+                style={{background:"linear-gradient(135deg,#1e3a6e,#1d4ed8)"}}>
+                Load Claim →
+              </button>
+            </>
+          )}
+
+          {/* UPLOAD FILE */}
+          {mode==="file" && (
+            <>
+              <div
+                onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+                onClick={()=>fileRef.current.click()}
+                className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all
+                  ${dragging?"border-blue-500 bg-blue-50":"border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50/30"}`}>
+                <div className="text-5xl mb-3">{dragging?"📂":"📁"}</div>
+                <p className="text-sm font-bold text-gray-700 mb-1">{dragging?"Drop it!":"Tap to choose a .json file"}</p>
+                <p className="text-xs text-gray-400">or drag & drop here</p>
+                <input ref={fileRef} type="file" accept=".json,application/json" className="hidden"
+                  onChange={e=>readFile(e.target.files[0])}/>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-gray-100"/>
+                <span className="text-xs text-gray-400 font-medium">or paste JSON below</span>
+                <div className="flex-1 h-px bg-gray-100"/>
+              </div>
+              <textarea value={json} onChange={e=>setJson(e.target.value)} rows={5}
+                placeholder="Paste JSON here as a fallback…"
+                className="w-full text-xs font-mono border border-gray-200 rounded-xl px-4 py-3 bg-white outline-none focus:border-blue-400 resize-none"/>
+              {json.trim() && (
+                <button onClick={handlePaste}
+                  className="w-full py-3 rounded-2xl text-white font-bold text-sm active:opacity-80"
+                  style={{background:"linear-gradient(135deg,#1e3a6e,#1d4ed8)"}}>
+                  Load from Pasted JSON →
+                </button>
+              )}
+            </>
+          )}
+
+          {/* API URL */}
+          {mode==="api" && (
+            <>
+              <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+                <p className="text-xs font-bold text-blue-700 mb-1">VA Lighthouse API Format</p>
+                <p className="text-xs text-blue-500 font-mono break-all">
+                  https://api.va.gov/services/claims/v2/veterans/&#123;icn&#125;/claims/&#123;id&#125;
+                </p>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5 block">API Endpoint URL</label>
+                <input value={url} onChange={e=>setUrl(e.target.value)}
+                  placeholder="https://api.va.gov/services/claims/v2/..."
+                  className="w-full text-sm border border-gray-200 rounded-xl px-4 py-3 bg-white outline-none focus:border-blue-400"/>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                  Bearer Token <span className="text-gray-300 font-normal">(optional)</span>
+                </label>
+                <input value={token} onChange={e=>setToken(e.target.value)} type="password"
+                  placeholder="eyJhbGciOiJSUzI1..."
+                  className="w-full text-sm border border-gray-200 rounded-xl px-4 py-3 bg-white outline-none focus:border-blue-400"/>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                <p className="text-xs text-amber-700">
+                  <strong>Note:</strong> The VA API requires OAuth 2.0 and may block direct browser requests (CORS). If it fails, use the Paste JSON or Upload File tab.
+                </p>
+              </div>
+              <button onClick={handleApi} disabled={loading}
+                className="w-full py-4 rounded-2xl text-white font-bold text-base disabled:opacity-60 active:opacity-80"
+                style={{background:"linear-gradient(135deg,#1e3a6e,#1d4ed8)"}}>
+                {loading
+                  ? <span className="flex items-center justify-center gap-2">
+                      <svg className="spinner w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" strokeOpacity="0.25"/>
+                        <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/>
+                      </svg>Fetching…
+                    </span>
+                  : "Fetch Claim →"
+                }
+              </button>
+            </>
+          )}
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+              <p className="text-xs text-red-600 font-medium">{error}</p>
+            </div>
+          )}
+
+          <p className="text-center text-xs text-gray-300 pb-2">
+            All data stays on your device — nothing is stored or transmitted
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── APP ROOT ── */
+function App() {
+  const [attr, setAttr] = useState(null);
+  if (attr) return <Dashboard attr={attr} onBack={()=>setAttr(null)}/>;
+  return <InputScreen onLoad={setAttr}/>;
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", ()=>navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
